@@ -33,7 +33,7 @@ export class OrdersService {
  async updateOrderStatus(orderId: string, status: string, reference?: string): Promise<Order> {
   const update: any = { status };
   if (reference) update.paymentReference = reference;
-  const order = await this.orderModel.findByIdAndUpdate(orderId, update, { new: true }).exec();
+  const order = await this.orderModel.findByIdAndUpdate(orderId, update, { returnDocument: 'after' }).exec();
   if (!order) {
     throw new Error(`Order ${orderId} not found`);
   }

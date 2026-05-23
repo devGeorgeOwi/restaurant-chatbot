@@ -17,7 +17,7 @@ export class SessionsService {
   }
 
   async updateSession(deviceId: string, update: Partial<Session>): Promise<Session> {
-    const session = await this.sessionModel.findOneAndUpdate({ deviceId }, update, { new: true }).exec();
+    const session = await this.sessionModel.findOneAndUpdate({ deviceId }, update, { returnDocument: 'after' }).exec();
     if (!session) {
        throw new Error(`Session for device ${deviceId} not found`);
     }
