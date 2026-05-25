@@ -33,7 +33,7 @@ private paystackPublic: string;
   private ordersService: OrdersService,
   private config: ConfigService,
 ) {
-  const pubKey = this.config.get<string>('paystackPublic');
+  const pubKey = this.config.get<string>('paystackPublic')?.trim();
   if (!pubKey) {
     throw new Error('PAYSTACK_PUBLIC_KEY is missing in environment variables');
   }
@@ -57,14 +57,25 @@ private paystackPublic: string;
     this.clients.set(client, deviceId);
     const session = await this.sessionsService.findOrCreate(deviceId);
     // Send welcome message
-    const response = await this.botService.processMessage('1', session); // trigger main menu indirectly
-    // Actually we want just the main menu, not '1' command. Better: call a dedicated method.
-    // We'll send directly:
+    // Send the main menu as structured data
+    const mainMenuData = {
+      type: 'mainMenu',
+      text: 'Welcome! Choose an option:',
+      buttons: [
+        { id: '1', label: '🍔 Place an Order' },
+        { id: '99', label: '🧾 Checkout' },
+        { id: '98', label: '📜 Order History' },
+        { id: '97', label: '🛒 Current Order' },
+        { id: '0', label: '❌ Cancel Order' },
+      ],
+    };
+
     client.send(JSON.stringify({
       type: 'botMessage',
-      message: `Welcome! Choose an option:\n1. Place an order\n99. Checkout order\n98. Order history\n97. Current order\n0. Cancel order`,
+      data: mainMenuData,          // ✅ nested correctly
     }));
-    // Also send deviceId back so client can store it
+
+    // Also send deviceId back
     client.send(JSON.stringify({ type: 'deviceId', deviceId }));
   }
 
@@ -77,48 +88,101 @@ private paystackPublic: string;
     if (!deviceId) return;
     const session = await this.sessionsService.findOrCreate(deviceId);
     const response = await this.botService.processMessage(data.text, session);
-    client.send(JSON.stringify({ type: 'botMessage', ...response }));
+    console.log('🌐 Gateway response:', JSON.stringify(response));
 
-    if (response.paymentRequired) {
-      client.send(JSON.stringify({
-        type: 'paymentRequired',
-        orderId: response.orderId,
-        amount: response.amount,
-        email: response.email,
-        publicKey: this.paystackPublic,
-      }));
+    // Send the structured message to the client
+    client.send(JSON.stringify({ 
+      type: 'botMessage', 
+      data: response,
+     }));
+
+    //  Handle payment separately if it's a checkout response
+    if (response.type === 'checkout' && response.orderSummary) {
+      const order = await this.ordersService.findCurrentOrder(session.deviceId, 'placed');
+      if (order) {
+        // Generate a unique reference for each payment attempt
+        const uniqueRef = `${order._id.toString()}-${Date.now()}`;
+        console.log('💳 Generated payment reference:', uniqueRef);
+
+        client.send(JSON.stringify({
+          type: 'paymentRequired',
+          orderId: order._id.toString(),
+          amount: order.total,
+          email: 'customer@example.com',
+          publicKey: this.paystackPublic,
+          reference: uniqueRef,
+        }));
+      }
     }
   }
 
   @SubscribeMessage('paymentSuccess')
-    async handlePaymentSuccess(
-    @ConnectedSocket() client: WebSocket,
-    @MessageBody() data: { reference: string; orderId: string },
-    ) {
-    const deviceId = this.clients.get(client);
-    if (!deviceId) {
-        client.send(JSON.stringify({ type: 'error', message: 'Session not found' }));
-        return;
-    }
+async handlePaymentSuccess(
+  @ConnectedSocket() client: WebSocket,
+  @MessageBody() data: { reference: string; orderId: string },
+) {
+  const deviceId = this.clients.get(client);
+  if (!deviceId) {
+    client.send(JSON.stringify({ type: 'error', message: 'Session not found' }));
+    return;
+  }
 
     try {
-        const verification = await this.paymentService.verifyPayment(data.reference);
-        if (verification.data.status === 'success') {
-        await this.ordersService.updateOrderStatus(data.orderId, 'paid', data.reference);
+      console.log('🔐 Verifying payment for reference:', data.reference, 'orderId:', data.orderId);
+
+      const verification = await this.paymentService.verifyPayment(data.reference);
+      console.log('📋 Paystack verification response:', JSON.stringify(verification));
+
+      if (verification.data.status === 'success') {
+        console.log('✅ Payment verified, updating order...');
+
+      
+        // Update order to paid
+        const updatedOrder = await this.ordersService.updateOrderStatus(
+          data.orderId, 
+          'paid', 
+          data.reference,
+        );
+
+        console.log('📦 Order updated:', updatedOrder?._id, 'new status:', updatedOrder?.status);
+
+        // Reset session
         await this.sessionsService.updateSession(deviceId, {
-            currentStep: 'mainMenu',
-            currentOrder: null,
-            temporaryData: {},
+          currentStep: 'mainMenu',
+          currentOrder: null,
+          temporaryData: {},
         });
+
+        // Send main menu with success message
         client.send(JSON.stringify({
-            type: 'botMessage',
-            message: 'Payment successful! Your order has been placed.\n1 - Place another order',
+          type: 'botMessage',
+          data: {
+            type: 'mainMenu',
+            text: '✅ Payment successful! Your order has been placed.',
+            buttons: [
+              { id: '1', label: '🍔 Place an Order' },
+              { id: '99', label: '🧾 Checkout' },
+              { id: '98', label: '📜 Order History' },
+              { id: '97', label: '🛒 Current Order' },
+              { id: '0', label: '❌ Cancel Order' },
+            ],
+          },
         }));
-        } else {
-        client.send(JSON.stringify({ type: 'botMessage', message: 'Payment failed. Try again.' }));
-        }
+      } else {
+        // Payment failed
+        console.log('❌ Paystack verification not successful:', verification.data);
+        client.send(JSON.stringify({
+          type: 'botMessage',
+          data: { type: 'text', text: 'Payment failed. Try again.' },
+        }));
+      }
     } catch (err) {
-        client.send(JSON.stringify({ type: 'botMessage', message: 'Payment verification error.' }));
+      // Network or verification error
+      console.error('💥 Payment verification error:', err);
+      client.send(JSON.stringify({
+        type: 'botMessage',
+        data: { type: 'text', text: 'Payment verification error. Please try again later.' },
+      }));
     }
-    }
+  }
 }

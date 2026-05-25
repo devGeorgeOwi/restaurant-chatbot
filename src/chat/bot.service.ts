@@ -16,7 +16,7 @@ export class BotService {
     const input = message.trim();
     const step = session.currentStep;
 
-    // Global commands
+    // ---- GLOBAL COMMANDS (work from any step) ----
     if (input === '0') return this.cancelOrder(session);
     if (input === '98') return this.orderHistory(session);
     if (input === '97') return this.currentOrderStatus(session);
@@ -25,6 +25,7 @@ export class BotService {
       return this.startPlacingOrder(session);
     }
 
+    // ---- STEP-SPECIFIC LOGIC ----
     switch (step) {
       case 'mainMenu':
         return this.mainMenuResponse();
@@ -33,35 +34,59 @@ export class BotService {
       case 'awaitingQuantity':
         return this.handleQuantityInput(input, session);
       default:
-        return { message: 'Invalid option. Please select from the menu.' };
+        return { type: 'text', text: 'Invalid option. Please select from the menu.' };
     }
   }
 
+  // ==================== RESPONSE BUILDERS ====================
+
   private mainMenuResponse() {
     return {
-      message: `Welcome! Choose an option:\n1. Place an order\n99. Checkout order\n98. Order history\n97. Current order\n0. Cancel order`,
+      type: 'mainMenu',
+      text: 'Welcome! Choose an option:',
+      buttons: [
+        { id: '1', label: '🍔 Place an Order' },
+        { id: '99', label: '🧾 Checkout' },
+        { id: '98', label: '📜 Order History' },
+        { id: '97', label: '🛒 Current Order' },
+        { id: '0', label: '❌ Cancel Order' },
+      ],
     };
   }
 
   private async startPlacingOrder(session: Session) {
     const menu = await this.menuService.getAvailableMenu();
-    if (menu.length === 0) return { message: 'Menu is empty.' };
-    const menuList = menu.map((item, idx) =>
-      `${idx + 1}. ${item.name} - ₦${(item.price / 100).toFixed(2)}`
-    ).join('\n');
+    if (menu.length === 0) return { type: 'text', text: 'Sorry, the menu is empty.' };
+
+    // Store menu in session for quick access later
     session.currentStep = 'placingOrder';
     session.temporaryData = { menu };
     await this.sessionsService.updateSession(session.deviceId, session);
-    return { message: `Here is our menu:\n${menuList}\n\nReply with the item number.` };
+
+    // Send menu as interactive cards
+    const items = menu.map((item, idx) => ({
+      id: (idx + 1).toString(),
+      name: item.name,
+      price: item.price,
+      description: item.description || '',
+    }));
+
+    return {
+      type: 'menuList',
+      text: 'Here is our menu. Tap an item to select it.',
+      items,
+    };
   }
 
   private async handleItemSelection(input: string, session: Session) {
     const menu = session.temporaryData?.menu;
     if (!menu) return this.startPlacingOrder(session);
+
     const itemIndex = parseInt(input, 10) - 1;
     if (isNaN(itemIndex) || itemIndex < 0 || itemIndex >= menu.length) {
-      return { message: 'Invalid item number.' };
+      return { type: 'text', text: 'Invalid item number. Please select from the menu.' };
     }
+
     const chosen = menu[itemIndex];
     session.temporaryData.pendingItem = {
       menuItemId: chosen._id,
@@ -70,49 +95,93 @@ export class BotService {
     };
     session.currentStep = 'awaitingQuantity';
     await this.sessionsService.updateSession(session.deviceId, session);
-    return { message: `How many ${chosen.name}? (Enter a number)` };
+
+    return {
+      type: 'quantityInput',
+      text: `How many ${chosen.name} would you like?`,
+      itemName: chosen.name,
+      // We'll provide quick quantity buttons on the frontend
+    };
   }
 
   private async handleQuantityInput(input: string, session: Session) {
     const quantity = parseInt(input, 10);
     if (isNaN(quantity) || quantity < 1) {
-      return { message: 'Enter a valid quantity (1 or more).' };
+      return { type: 'text', text: 'Please enter a valid quantity (1 or more).' };
     }
+
     const pending = session.temporaryData?.pendingItem;
     if (!pending) {
       session.currentStep = 'placingOrder';
       await this.sessionsService.updateSession(session.deviceId, session);
-      return { message: 'Something went wrong. Please select an item again.' };
+      return { type: 'text', text: 'Something went wrong. Please select an item again.' };
     }
+
     const order = await this.ordersService.createOrUpdateOrder(session.deviceId, {
       menuItem: pending.menuItemId,
       quantity,
       priceAtOrder: pending.price,
     });
+
     session.currentOrder = order._id;
     session.currentStep = 'placingOrder';
     session.temporaryData.pendingItem = undefined;
     await this.sessionsService.updateSession(session.deviceId, session);
+
+    // Return to menu with a success message
+    const menu = await this.menuService.getAvailableMenu();
+    console.log('🔎 BotService: fetched menu items count:', menu.length);
+    const items = menu.map((item, idx) => ({
+      id: (idx + 1).toString(),
+      name: item.name,
+      price: item.price,
+      description: item.description || '',
+    }));
+
+    console.log('📤 BotService: returning menuList with items:', JSON.stringify(items));
+
     return {
-      message: `${quantity}x ${pending.name} added. Select another item, or:\n99 - Checkout\n97 - Current order\n0 - Cancel`,
+      type: 'menuList',
+      text: `✅ Added ${quantity}x ${pending.name} to your order.\n\nYou can select another item or use these options:`,
+      items,
+      // Also show quick action buttons below the menu
+      buttons: [
+        { id: '99', label: '🧾 Checkout' },
+        { id: '97', label: '🛒 View Order' },
+        { id: '0', label: '❌ Cancel' },
+      ],
     };
   }
 
   private async checkout(session: Session) {
     const order = await this.ordersService.findCurrentOrder(session.deviceId, 'pending');
     if (!order || order.items.length === 0) {
-      return { message: 'No order to place. Enter 1 to start a new order.' };
+      return { type: 'text', text: 'No order to place. Enter 1 to start a new order.' };
     }
-    order.status = 'placed'; // mark as placed before payment
+
+    order.status = 'placed';
     await order.save();
+
     session.currentStep = 'checkout';
     await this.sessionsService.updateSession(session.deviceId, session);
+
+    // Build a summary card
+    const items = order.items.map(i => ({
+      name: (i.menuItem as any)?.name || 'Unknown Item',
+      quantity: i.quantity,
+      price: i.priceAtOrder,
+    }));
+    const totalNaira = (order.total / 100).toFixed(2);
+
     return {
-      message: `Order: ${order.items.map(i => `${i.quantity}x ${(i.menuItem as any).name}`).join(', ')}\nTotal: ₦${(order.total / 100).toFixed(2)}\nClick the payment button to pay.`,
-      paymentRequired: true,
-      orderId: order._id.toString(),
-      amount: order.total,
-      email: 'customer@example.com', // in production, ask for email earlier
+      type: 'checkout',
+      text: 'Please confirm your order and pay.',
+      orderSummary: {
+        items,
+        total: totalNaira,
+        orderId: order._id.toString(),
+      },
+      // The gateway will attach paymentRequired separately
     };
   }
 
@@ -124,24 +193,90 @@ export class BotService {
     session.currentStep = 'mainMenu';
     session.temporaryData = {};
     await this.sessionsService.updateSession(session.deviceId, session);
-    return { message: 'Order cancelled. Enter 1 to start a new order.' };
+
+    return {
+      type: 'mainMenu',
+      text: '❌ Order cancelled.',
+      buttons: [
+        { id: '1', label: '🍔 Place a New Order' },
+        { id: '98', label: '📜 Order History' },
+        { id: '97', label: '🛒 Current Order' },
+      ],
+    };
   }
 
   private async orderHistory(session: Session) {
     const orders = await this.ordersService.getOrderHistory(session.deviceId);
-    if (orders.length === 0) return { message: 'No order history.' };
-    const list = orders.map(o =>
-      `Order ${o._id.toString().slice(-4)}: ${o.items.map(i => `${i.quantity}x ${(i.menuItem as any).name}`).join(', ')} | Total: ₦${(o.total / 100).toFixed(2)} | Status: ${o.status}`
-    ).join('\n\n');
-    return { message: `Your order history:\n${list}` };
+    if (orders.length === 0) return { type: 'text', text: 'No order history found.' };
+
+    const historyItems = orders.map(o => ({
+      id: o._id.toString().slice(-4),
+      items: o.items.map(i => `${i.quantity}x ${(i.menuItem as any)?.name || 'Unknown'}`).join(', '),
+      total: `₦${(o.total / 100).toFixed(2)}`,
+      status: o.status,
+      date: o.createdAt?.toLocaleDateString() ?? 'N/A',
+    }));
+
+    return {
+      type: 'orderHistory',
+      text: 'Your past orders:',
+      orders: historyItems,
+      buttons: [
+        { id: '1', label: '🍔 New Order' },
+        { id: '97', label: '🛒 Current Order' },
+      ],
+    };
   }
 
   private async currentOrderStatus(session: Session) {
-    const order = await this.ordersService.findCurrentOrder(session.deviceId, session.currentStep === 'checkout' ? 'placed' : 'pending');
-    if (!order) return { message: 'No current order. Enter 1 to place one.' };
-    const items = order.items.map(i => `${i.quantity}x ${(i.menuItem as any).name}`).join('\n');
+    let order = await this.ordersService.findCurrentOrder(session.deviceId, 'pending');
+    if (!order) {
+      order = await this.ordersService.findCurrentOrder(session.deviceId, 'placed');
+    }
+
+    if (!order || order.items.length === 0) {
+       return {
+        type: 'mainMenu',
+        text: 'No order to place. Choose an option:',
+        buttons: [
+          { id: '1', label: '🍔 Place an Order' },
+          { id: '99', label: '🧾 Checkout' },
+          { id: '98', label: '📜 Order History' },
+          { id: '97', label: '🛒 Current Order' },
+          { id: '0', label: '❌ Cancel Order' },
+        ],
+      };
+    }
+
+    // Mark as placed if not already
+    if (order.status !== 'placed') {
+      order.status = 'placed';
+      await order.save();
+    }
+
+    session.currentStep = 'checkout';
+    await this.sessionsService.updateSession(session.deviceId, session);
+
+    const items = order.items.map(i => ({
+      name: (i.menuItem as any)?.name || 'Unknown',
+      quantity: i.quantity,
+      price: i.priceAtOrder,
+    }));
+    const totalNaira = (order.total / 100).toFixed(2);
+
     return {
-      message: `Current order:\n${items}\nTotal: ₦${(order.total / 100).toFixed(2)} (Status: ${order.status})\n\n99 - Checkout\n0 - Cancel`,
+      type: 'checkout',
+      text: 'Please confirm your order and pay.',
+      orderSummary: { 
+        items, 
+        total: totalNaira,
+        orderId: order._id.toString(),
+      },
+      buttons: [
+        { id: '99', label: '🧾 Checkout' },
+        { id: '1', label: '➕ Add More Items' },
+        { id: '0', label: '❌ Cancel Order' },
+      ],
     };
   }
 }

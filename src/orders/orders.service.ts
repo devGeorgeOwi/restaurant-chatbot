@@ -13,7 +13,9 @@ export class OrdersService {
 
   async getOrderHistory(sessionId: string): Promise<Order[]> {
     return this.orderModel.find({ sessionId, status: { $ne: 'cancelled' } })
-      .sort({ createdAt: -1 }).populate('items.menuItem').exec();
+      .sort({ createdAt: -1 })
+      .populate('items.menuItem')
+      .exec();
   }
 
   async createOrUpdateOrder(sessionId: string, item: any): Promise<Order> {

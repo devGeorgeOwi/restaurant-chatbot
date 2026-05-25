@@ -7,17 +7,24 @@
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <div id="chat-container">
+  <div id="app">
+    <!-- Header -->
+    <header id="chat-header">
+      <h1>🍽️ Restaurant Bot</h1>
+      <span class="subtitle">Order your favourite meals</span>
+    </header>
+
+    <!-- Messages -->
     <div id="chat-messages"></div>
+
+    <!-- Input -->
     <form id="chat-form">
       <input type="text" id="message-input" placeholder="Type a number..." autofocus />
-      <button type="submit">Send</button>
+      <button type="submit" id="send-btn">Send</button>
     </form>
   </div>
 
-  <!-- Paystack inline script -->
-  <script src="https://js.paystack.co/v1/inline.js"></script>
-  <!-- Our chat logic -->
+  <script src="https://js.paystack.co/v2/inline.js"></script>
   <script src="chat.js"></script>
 </body>
 </html>
