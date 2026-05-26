@@ -56,6 +56,11 @@ private paystackPublic: string;
     let deviceId = data.deviceId || uuidv4();
     this.clients.set(client, deviceId);
     const session = await this.sessionsService.findOrCreate(deviceId);
+
+    // 🔁 Reset session to main menu on every page load
+    session.currentStep = 'mainMenu';
+    session.temporaryData = {};
+    await session.save();
     // Send welcome message
     // Send the main menu as structured data
     const mainMenuData = {
